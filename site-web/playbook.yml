@@ -1,0 +1,88 @@
+---
+- name: Déployer un site web Flask avec Ansible
+  hosts: servers
+  become: yes
+
+  tasks:
+    - name: Installer dépendances Python et Apache
+      apt:
+        name:
+          - apache2
+          - python3-pip
+          - python3-venv
+        state: present
+        update_cache: yes
+
+    - name: Créer un dossier pour le site
+      file:
+        path: /var/www/monsite
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Copier l'application Flask sur le serveur
+      copy:
+        src: site/
+        dest: /var/www/monsite/
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Créer un environnement virtuel Python
+      command: python3 -m venv /var/www/monsite/venv
+      args:
+        creates: /var/www/monsite/venv
+
+    - name: Installer SQLAlchemy via pip
+      command: /var/www/monsite/venv/bin/pip install flask_sqlalchemy
+      args:
+        chdir: /var/www/monsite/
+
+    - name: Créer un service systemd pour gunicorn
+      copy:
+        dest: /etc/systemd/system/monsite.service
+        content: |
+          [Unit]
+          Description=Application Flask avec Gunicorn
+          After=network.target
+
+          [Service]
+          User=www-data
+          Group=www-data
+          WorkingDirectory=/var/www/monsite
+          Environment="PATH=/var/www/monsite/venv/bin"
+          ExecStart=/var/www/monsite/venv/bin/gunicorn --workers 3 --bind unix:/var/www/monsite/monsite.sock wsgi:app
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Redémarrer et activer le service Flask
+      systemd:
+        name: monsite
+        enabled: yes
+        state: restarted
+
+    - name: Configurer Apache pour reverse proxy vers Flask
+      copy:
+        dest: /etc/apache2/sites-available/monsite.conf
+        content: |
+          <VirtualHost *:80>
+              ServerName monsite.local
+              ServerAdmin webmaster@localhost
+
+              ProxyPreserveHost On
+              ProxyPass / unix:/var/www/monsite/monsite.sock|http://localhost/
+              ProxyPassReverse / unix:/var/www/monsite/monsite.sock|http://localhost/
+
+              ErrorLog ${APACHE_LOG_DIR}/error.log
+              CustomLog ${APACHE_LOG_DIR}/access.log combined
+          </VirtualHost>
+
+    - name: Activer modules Apache et site
+      shell: |
+        a2enmod proxy proxy_http proxy_uwsgi
+        a2ensite monsite.conf
+        systemctl reload apache2
+      args:
+        executable: /bin/bash
